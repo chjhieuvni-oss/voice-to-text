@@ -59,7 +59,7 @@ from PIL import Image, ImageDraw, ImageTk
 import winsound
 
 # Constants
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.1"
 GITHUB_REPO = "chjhieuvni-oss/voice-to-text"
 DEFAULT_UPDATE_MANIFEST_URL = ""
 CLICK_X = 1066
@@ -451,50 +451,12 @@ def focus_vscode():
         pass
 
 
-# Structures for modern Windows SendInput
-class KEYBDINPUT(ctypes.Structure):
-    _fields_ = [
-        ("wVk", ctypes.c_ushort),
-        ("wScan", ctypes.c_ushort),
-        ("dwFlags", ctypes.c_ulong),
-        ("time", ctypes.c_ulong),
-        ("dwExtraInfo", ctypes.c_ulonglong)
-    ]
-
-class HARDWAREINPUT(ctypes.Structure):
-    _fields_ = [("uMsg", ctypes.c_ulong), ("wParamL", ctypes.c_short), ("wParamH", ctypes.c_ushort)]
-
-class MOUSEINPUT(ctypes.Structure):
-    _fields_ = [
-        ("dx", ctypes.c_long), ("dy", ctypes.c_long),
-        ("mouseData", ctypes.c_ulong), ("dwFlags", ctypes.c_ulong),
-        ("time", ctypes.c_ulong), ("dwExtraInfo", ctypes.c_ulonglong)
-    ]
-
-class _INPUT_UNION(ctypes.Union):
-    _fields_ = [("mi", MOUSEINPUT), ("ki", KEYBDINPUT), ("hi", HARDWAREINPUT)]
-
-class INPUT(ctypes.Structure):
-    _fields_ = [("type", ctypes.c_ulong), ("union", _INPUT_UNION)]
-
-
 def send_key_event(vk, is_up=False):
-    """Sends a keyboard event with both VirtualKey and hardware ScanCode via SendInput (and keybd_event fallback)."""
+    """Sends a keyboard event with both VirtualKey and hardware ScanCode via keybd_event."""
     user32 = ctypes.windll.user32
     scan = user32.MapVirtualKeyW(vk, 0)
     flags = 0x0002 if is_up else 0  # KEYEVENTF_KEYUP
-
-    inp = INPUT()
-    inp.type = 1  # INPUT_KEYBOARD
-    inp.union.ki.wVk = vk
-    inp.union.ki.wScan = scan
-    inp.union.ki.dwFlags = flags
-    inp.union.ki.time = 0
-    inp.union.ki.dwExtraInfo = 0
-
-    res = user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
-    if res == 0:
-        user32.keybd_event(vk, scan, flags, 0)
+    user32.keybd_event(vk, scan, flags, 0)
 
 
 def is_remote_desktop_window(hwnd):
@@ -513,11 +475,14 @@ def is_remote_desktop_window(hwnd):
 
 
 def force_foreground_window(hwnd):
-    """Brings the target window to foreground reliably and ensures child input control (FLUTTERVIEW etc.) has keyboard focus."""
+    """Brings the target window to foreground reliably without losing or stealing input focus."""
     if not hwnd or not ctypes.windll.user32.IsWindow(hwnd):
         return False
     user32 = ctypes.windll.user32
     curr_fg = user32.GetForegroundWindow()
+    # CRITICAL: If target is already the active foreground window, DO NOT touch or reset focus!
+    if curr_fg == hwnd:
+        return True
 
     my_tid = ctypes.windll.kernel32.GetCurrentThreadId()
     fg_tid = user32.GetWindowThreadProcessId(curr_fg, None) if curr_fg else 0
@@ -533,12 +498,11 @@ def force_foreground_window(hwnd):
         user32.ShowWindow(hwnd, 5)  # SW_SHOW
         res = user32.SetForegroundWindow(hwnd)
 
-        # Set keyboard focus to child control if present (e.g. FLUTTERVIEW in RustDesk)
-        child = user32.FindWindowExW(hwnd, None, "FLUTTERVIEW", None)
-        if not child:
-            child = user32.FindWindowExW(hwnd, None, None, None)
-        target_focus = child if (child and user32.IsWindow(child)) else hwnd
-        user32.SetFocus(target_focus)
+        # For RustDesk: if child FLUTTERVIEW exists, set focus to it
+        if is_remote_desktop_window(hwnd):
+            child = user32.FindWindowExW(hwnd, None, "FLUTTERVIEW", None)
+            if child and user32.IsWindow(child):
+                user32.SetFocus(child)
 
         if fg_tid and fg_tid != my_tid:
             user32.AttachThreadInput(my_tid, fg_tid, False)
@@ -554,11 +518,11 @@ def send_paste():
     VK_CONTROL = 0x11
     VK_V = 0x56
     send_key_event(VK_CONTROL, is_up=False)
-    time.sleep(0.025)
+    time.sleep(0.02)
     send_key_event(VK_V, is_up=False)
-    time.sleep(0.045)
+    time.sleep(0.035)
     send_key_event(VK_V, is_up=True)
-    time.sleep(0.025)
+    time.sleep(0.02)
     send_key_event(VK_CONTROL, is_up=True)
 
 
@@ -567,11 +531,11 @@ def send_select_all():
     VK_CONTROL = 0x11
     VK_A = 0x41
     send_key_event(VK_CONTROL, is_up=False)
-    time.sleep(0.025)
+    time.sleep(0.02)
     send_key_event(VK_A, is_up=False)
-    time.sleep(0.045)
+    time.sleep(0.035)
     send_key_event(VK_A, is_up=True)
-    time.sleep(0.025)
+    time.sleep(0.02)
     send_key_event(VK_CONTROL, is_up=True)
 
 
@@ -580,11 +544,11 @@ def send_copy():
     VK_CONTROL = 0x11
     VK_C = 0x43
     send_key_event(VK_CONTROL, is_up=False)
-    time.sleep(0.025)
+    time.sleep(0.02)
     send_key_event(VK_C, is_up=False)
-    time.sleep(0.045)
+    time.sleep(0.035)
     send_key_event(VK_C, is_up=True)
-    time.sleep(0.025)
+    time.sleep(0.02)
     send_key_event(VK_CONTROL, is_up=True)
 
 
@@ -592,7 +556,7 @@ def send_enter():
     """Simulates Enter key with hardware scancode and proper hold timing for all apps including RustDesk."""
     VK_RETURN = 0x0D
     send_key_event(VK_RETURN, is_up=False)
-    time.sleep(0.045)
+    time.sleep(0.035)
     send_key_event(VK_RETURN, is_up=True)
 
 
@@ -1640,13 +1604,17 @@ class App:
     def _watch_click_to_finish(self):
         """Monitors for left-click anywhere while recording to immediately finish & paste+enter."""
         user32 = ctypes.windll.user32
+        user32.GetAsyncKeyState.restype = ctypes.c_short
+        user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
         VK_LBUTTON = 0x01
 
-        # Grace period: ignore the click that started recording
-        time.sleep(0.35)
-        # Flush any currently held mouse down
-        while self.listening and (user32.GetAsyncKeyState(VK_LBUTTON) & 0x8000):
-            time.sleep(0.02)
+        # Grace period: if left button is currently pressed down (e.g. from clicking Mic), wait until released
+        if user32.GetAsyncKeyState(VK_LBUTTON) & 0x8000:
+            while self.listening and (user32.GetAsyncKeyState(VK_LBUTTON) & 0x8000):
+                time.sleep(0.01)
+            time.sleep(0.04)
+        else:
+            time.sleep(0.05)
 
         while self.listening and not getattr(self, '_stop_requested', False):
             state = user32.GetAsyncKeyState(VK_LBUTTON)
@@ -1669,16 +1637,28 @@ class App:
                 # Wait for mouse release so the target window receives the click event cleanly
                 while user32.GetAsyncKeyState(VK_LBUTTON) & 0x8000:
                     time.sleep(0.01)
-                time.sleep(0.05)
+                time.sleep(0.04)
 
-                target_hwnd = user32.GetForegroundWindow()
-                self._click_target_hwnd = target_hwnd
+                # Determine the exact window clicked
+                try:
+                    point = wintypes.POINT(int(px), int(py))
+                    wnd_under_cursor = user32.WindowFromPoint(point)
+                    GA_ROOT = 2
+                    root_wnd = user32.GetAncestor(wnd_under_cursor, GA_ROOT) if wnd_under_cursor else 0
+                    fg_wnd = user32.GetForegroundWindow()
+                    target = root_wnd or wnd_under_cursor or fg_wnd
+                    if not target or target == self.root.winfo_id() or self._is_own_window(target):
+                        target = getattr(self, 'last_external_hwnd', None)
+                except Exception:
+                    target = user32.GetForegroundWindow()
+
+                self._click_target_hwnd = target
                 self._auto_paste_enter_on_finish = True
                 self._stop_requested = True
                 self.root.after(0, lambda: self.status.config(text="Transcribing...", fg=self.yellow))
                 break
 
-            time.sleep(0.01)
+            time.sleep(0.008)
 
     def recognize_bilingual(self, audio):
         """Intelligently recognizes speech with single-pass FLAC encoding and early return."""
@@ -1817,11 +1797,12 @@ class App:
                     target = getattr(self, '_click_target_hwnd', None) or getattr(self, 'last_external_hwnd', None)
                     is_remote = is_remote_desktop_window(target)
                     if target and ctypes.windll.user32.IsWindow(target):
-                        force_foreground_window(target)
-                        # Remote desktop clients (RustDesk) need adequate time to sync clipboard over network
-                        time.sleep(0.30 if is_remote else 0.08)
+                        curr_fg = ctypes.windll.user32.GetForegroundWindow()
+                        if curr_fg != target:
+                            force_foreground_window(target)
+                        time.sleep(0.25 if is_remote else 0.06)
                     else:
-                        time.sleep(0.08)
+                        time.sleep(0.06)
 
                     send_paste()
                     temp_status = ("Pasted", self.green)
