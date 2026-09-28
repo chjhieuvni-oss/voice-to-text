@@ -60,6 +60,7 @@ import winsound
 
 # Constants
 APP_VERSION = "2.0.0"
+GITHUB_REPO = "chjhieuvni-oss/voice-to-text"
 DEFAULT_UPDATE_MANIFEST_URL = ""
 CLICK_X = 1066
 CLICK_Y = 1012
@@ -658,6 +659,188 @@ def send_down():
     user32.keybd_event(VK_DOWN, 0, KEYEVENTF_KEYUP, 0)
 
 
+# ==========================================
+# AUTO-UPDATE VIA GITHUB RELEASES
+# ==========================================
+
+def parse_semver(v_str: str):
+    """Parses version strings like 'v2.0.1', '2.0.0', 'v2.1' into tuple (major, minor, patch)."""
+    if not v_str:
+        return (0, 0, 0)
+    clean = str(v_str).strip().lstrip('vV').split('-')[0].split('+')[0]
+    nums = []
+    for part in clean.split('.'):
+        try:
+            nums.append(int(re.sub(r'\D', '', part) or '0'))
+        except Exception:
+            nums.append(0)
+    while len(nums) < 3:
+        nums.append(0)
+    return tuple(nums[:3])
+
+
+def check_github_update(repo: str = GITHUB_REPO, current_ver: str = APP_VERSION, timeout: float = 6.0) -> dict:
+    """Queries GitHub API for latest release in public repo."""
+    url = f"https://api.github.com/repos/{repo.strip()}/releases/latest"
+    headers = {
+        "User-Agent": f"VoiceToText-App/{current_ver}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    try:
+        req = urllib.request.Request(url, headers=headers, method='GET')
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if resp.status == 200:
+                data = json.loads(resp.read().decode('utf-8'))
+                tag = data.get("tag_name", "").strip()
+                rel_name = data.get("name", tag) or tag
+                body = data.get("body", "").strip()
+                html_url = data.get("html_url", f"https://github.com/{repo}/releases")
+
+                asset_url = None
+                asset_name = None
+                asset_size = 0
+                for a in data.get("assets", []):
+                    aname = a.get("name", "")
+                    if aname.lower().endswith(".exe"):
+                        asset_url = a.get("browser_download_url")
+                        asset_name = aname
+                        asset_size = a.get("size", 0)
+                        break
+
+                if not asset_url and data.get("assets"):
+                    first_a = data["assets"][0]
+                    asset_url = first_a.get("browser_download_url")
+                    asset_name = first_a.get("name")
+                    asset_size = first_a.get("size", 0)
+
+                has_update = parse_semver(tag) > parse_semver(current_ver)
+                return {
+                    "has_update": has_update,
+                    "latest_ver": tag,
+                    "current_ver": current_ver,
+                    "release_name": rel_name,
+                    "body": body,
+                    "html_url": html_url,
+                    "download_url": asset_url,
+                    "asset_name": asset_name or "voice_to_text.exe",
+                    "asset_size": asset_size,
+                    "error": None
+                }
+    except urllib.error.HTTPError as he:
+        if he.code == 404:
+            return {
+                "has_update": False,
+                "latest_ver": current_ver,
+                "current_ver": current_ver,
+                "release_name": "",
+                "body": "",
+                "html_url": f"https://github.com/{repo}/releases",
+                "download_url": None,
+                "asset_name": "voice_to_text.exe",
+                "asset_size": 0,
+                "error": None,
+                "no_releases": True
+            }
+        return {"has_update": False, "latest_ver": current_ver, "error": f"HTTP {he.code}: {he.reason}"}
+    except Exception as e:
+        return {"has_update": False, "latest_ver": current_ver, "error": str(e)}
+
+
+def download_update_file(url: str, dest_path: str, progress_callback=None, timeout: float = 60.0) -> bool:
+    """Downloads file with chunked streaming and progress callback."""
+    tmp_path = dest_path + ".tmp"
+    headers = {"User-Agent": f"VoiceToText-App/{APP_VERSION}"}
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            total_size = int(resp.headers.get('content-length', 0))
+            downloaded = 0
+            block_size = 64 * 1024
+            with open(tmp_path, 'wb') as out_f:
+                while True:
+                    chunk = resp.read(block_size)
+                    if not chunk:
+                        break
+                    out_f.write(chunk)
+                    downloaded += len(chunk)
+                    if progress_callback:
+                        pct = int((downloaded / total_size) * 100) if total_size > 0 else 0
+                        progress_callback(downloaded, total_size, pct)
+        if os.path.exists(dest_path):
+            try:
+                os.remove(dest_path)
+            except Exception:
+                pass
+        os.rename(tmp_path, dest_path)
+        return True
+    except Exception as e:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+        raise e
+
+
+def launch_updater_and_restart(new_file_path: str, target_exe_path: str = None) -> bool:
+    """Creates and executes detached _apply_update.bat to replace the exe and relaunch seamlessly."""
+    base_dir = get_base_dir()
+    if not target_exe_path:
+        if getattr(sys, 'frozen', False):
+            target_exe_path = sys.executable
+        else:
+            target_exe_path = os.path.join(base_dir, "voice_to_text.exe")
+
+    target_exe_path = os.path.abspath(target_exe_path)
+    new_file_path = os.path.abspath(new_file_path)
+    backup_exe_path = os.path.abspath(os.path.join(base_dir, "voice_to_text_backup.exe"))
+    bat_path = os.path.abspath(os.path.join(base_dir, "_apply_update.bat"))
+    current_pid = os.getpid()
+
+    bat_content = f"""@echo off
+chcp 65001 >nul
+set PID={current_pid}
+set RETRIES=0
+
+:WAIT_PID
+tasklist /FI "PID eq %PID%" 2>nul | find /I "%PID%" >nul
+if "%ERRORLEVEL%"=="0" (
+    timeout /t 1 /nobreak >nul
+    set /a RETRIES+=1
+    if %RETRIES% LSS 10 goto WAIT_PID
+    taskkill /F /PID %PID% >nul 2>&1
+)
+timeout /t 1 /nobreak >nul
+
+if exist "{target_exe_path}" (
+    copy /Y "{target_exe_path}" "{backup_exe_path}" >nul 2>&1
+)
+
+move /Y "{new_file_path}" "{target_exe_path}" >nul 2>&1
+if errorlevel 1 (
+    copy /Y "{new_file_path}" "{target_exe_path}" >nul 2>&1
+    del /f /q "{new_file_path}" >nul 2>&1
+)
+
+start "" "{target_exe_path}"
+(goto) 2>nul & del "%~f0"
+"""
+
+    with open(bat_path, 'w', encoding='utf-8') as f:
+        f.write(bat_content)
+
+    DETACHED_PROCESS = 0x00000008
+    CREATE_NO_WINDOW = 0x08000000
+    subprocess.Popen(
+        ["cmd.exe", "/c", bat_path],
+        creationflags=DETACHED_PROCESS | CREATE_NO_WINDOW,
+        close_fds=True,
+        shell=False
+    )
+    return True
+
+
+
 
 class CancellableStream:
     """Wraps PyAudio stream so listen() breaks immediately when stop condition is met."""
@@ -821,6 +1004,8 @@ class App:
         self.gemini_enabled = True
         self.gemini_api_key = ""
         self.gemini_model = "gemini-2.5-flash"
+        self.auto_check_update = True
+        self.github_repo = GITHUB_REPO
 
         # Load persisted config
         self.load_config()
@@ -878,6 +1063,9 @@ class App:
 
         # Check Gemini API status & set border color (Green = OK, Yellow = Disconnected/No Key)
         self.root.after(150, self.update_gemini_border_status)
+
+        # Background check for updates via GitHub Releases
+        self.root.after(3500, self._start_background_update_check)
 
     def rebuild_toolbar(self):
         """Constructs or reconstructs the toolbar with current self.ui_scale and all buttons."""
@@ -1232,6 +1420,8 @@ class App:
         menu.add_separator()
         menu.add_command(label="Thử âm thanh (Test Beep)", command=lambda: winsound.Beep(1800, 150))
         menu.add_separator()
+        menu.add_command(label=f"🔄 Kiểm tra cập nhật (v{APP_VERSION})", command=self.check_updates_interactive)
+        menu.add_separator()
         menu.add_command(label="Thoát (Exit)", command=self.close_app)
         menu.post(e.x_root, e.y_root)
         self.menu = menu
@@ -1272,6 +1462,8 @@ class App:
                     if m in ('gemini-1.5-flash', 'gemini-1.5-pro'):
                         m = 'gemini-2.5-flash'
                     self.gemini_model = m
+                    self.auto_check_update = bool(data.get('auto_check_update', True))
+                    self.github_repo = str(data.get('github_repo', GITHUB_REPO))
                     self.config_path = path
                     break
                 except Exception as ex:
@@ -1292,7 +1484,9 @@ class App:
             "paste_enter_delay": round(getattr(self, 'paste_enter_delay', 0.3), 2),
             "gemini_enabled": getattr(self, 'gemini_enabled', True),
             "gemini_api_key": getattr(self, 'gemini_api_key', ''),
-            "gemini_model": getattr(self, 'gemini_model', 'gemini-2.5-flash')
+            "gemini_model": getattr(self, 'gemini_model', 'gemini-2.5-flash'),
+            "auto_check_update": getattr(self, 'auto_check_update', True),
+            "github_repo": getattr(self, 'github_repo', GITHUB_REPO)
         }
         for path in self.config_candidates:
             try:
@@ -2177,6 +2371,29 @@ class App:
         tk.Label(card4, text="• Ctrl + L : Bật / Tắt Mic thu âm giọng nói", font=fnt_body, bg='#262626', fg='#40ff88').pack(anchor='w', pady=1)
         tk.Label(card4, text="• Ctrl + S : Dừng / Hủy thu âm hoặc dừng task", font=fnt_body, bg='#262626', fg='#ff6666').pack(anchor='w', pady=1)
 
+        # Card 6: Auto-Update (GitHub Releases)
+        card_update = tk.Frame(pad, bg='#1c252d', padx=12, pady=10, highlightthickness=1, highlightbackground='#2a485e')
+        card_update.pack(fill='x', pady=(0, 10))
+        tk.Label(card_update, text="🚀 CẬP NHẬT PHẦN MỀM (AUTO-UPDATE GITHUB):", font=fnt_sec, bg='#1c252d', fg='#48cae4').pack(anchor='w', pady=(0, 4))
+
+        row_ver = tk.Frame(card_update, bg='#1c252d')
+        row_ver.pack(fill='x', pady=(2, 4))
+        tk.Label(row_ver, text=f"Phiên bản hiện tại: v{APP_VERSION}", font=fnt_sec, bg='#1c252d', fg='#ffffff').pack(side='left')
+        tk.Button(
+            row_ver, text="🔄 Kiểm tra cập nhật ngay", font=fnt_sub, bg='#0077b6', fg=self.white,
+            relief='flat', cursor='hand2', padx=10, command=self.check_updates_interactive
+        ).pack(side='right', ipady=2)
+
+        self.auto_update_var = tk.BooleanVar(value=getattr(self, 'auto_check_update', True))
+        cb_update = tk.Checkbutton(
+            card_update, text="Tự động kiểm tra bản mới nhất từ GitHub khi khởi động",
+            variable=self.auto_update_var, font=fnt_body, bg='#1c252d', fg='#dddddd',
+            selectcolor='#101920', activebackground='#1c252d', activeforeground='#48cae4', cursor='hand2'
+        )
+        cb_update.pack(anchor='w', pady=(2, 3))
+
+        tk.Label(card_update, text=f"• GitHub: https://github.com/{getattr(self, 'github_repo', GITHUB_REPO)}", font=fnt_sub, bg='#1c252d', fg='#7d9bb0').pack(anchor='w')
+
     def _start_record_coord(self):
         self.show_temp_status("Click mục tiêu!", self.yellow, 4000)
         def _rec():
@@ -2234,6 +2451,8 @@ class App:
                         self.rebuild_toolbar()
                 except Exception as ex:
                     self._log_error(f"save_settings ui_scale: {ex}")
+            if hasattr(self, 'auto_update_var') and self.auto_update_var:
+                self.auto_check_update = bool(self.auto_update_var.get())
             self.save_config()
             self.update_gemini_border_status()
             if self.settings_win:
@@ -2241,6 +2460,183 @@ class App:
             self.show_temp_status("Đã lưu!", self.green)
         except Exception as e:
             messagebox.showerror("Lỗi", f"Giá trị không hợp lệ: {e}")
+
+    def _start_background_update_check(self):
+        """Silently checks for updates in background on startup."""
+        if not getattr(self, 'auto_check_update', True):
+            return
+
+        def _worker():
+            repo = getattr(self, 'github_repo', GITHUB_REPO)
+            info = check_github_update(repo=repo, current_ver=APP_VERSION, timeout=8.0)
+            if info.get('has_update'):
+                try:
+                    self.root.after(0, lambda: self._prompt_update_dialog(info))
+                except Exception:
+                    pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def check_updates_interactive(self):
+        """Manual check triggered from context menu or settings button."""
+        self.show_temp_status("Checking...", self.yellow, 3000)
+
+        def _worker():
+            repo = getattr(self, 'github_repo', GITHUB_REPO)
+            info = check_github_update(repo=repo, current_ver=APP_VERSION, timeout=8.0)
+            try:
+                if info.get('has_update'):
+                    self.root.after(0, lambda: self._prompt_update_dialog(info))
+                elif info.get('error'):
+                    self.root.after(0, lambda: messagebox.showwarning(
+                        "Kiểm tra cập nhật",
+                        f"Không thể kiểm tra cập nhật:\n{info['error']}\n\nVui lòng kiểm tra lại kết nối mạng hoặc thử lại sau."
+                    ))
+                else:
+                    self.root.after(0, lambda: messagebox.showinfo(
+                        "Cập nhật phần mềm",
+                        f"Bạn đang sử dụng phiên bản mới nhất (v{APP_VERSION})!\nKhông có bản cập nhật mới nào."
+                    ))
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _prompt_update_dialog(self, info):
+        """Displays a clean modal dialog when a new release is detected."""
+        latest_ver = info.get('latest_ver', 'Mới')
+        release_name = info.get('release_name') or f"Phiên bản {latest_ver}"
+        body = info.get('body', '').strip()
+        asset_size = info.get('asset_size', 0)
+        size_str = f" • Dung lượng: {asset_size / (1024 * 1024):.1f} MB" if asset_size > 0 else ""
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title(f"Cập nhật mới: {latest_ver}")
+        dlg.configure(bg='#1e1e1e')
+        dlg.attributes('-topmost', True)
+        dlg.resizable(False, False)
+
+        dw, dh = 460, 360
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        dx = max(40, (sw - dw) // 2)
+        dy = max(40, (sh - dh) // 2)
+        dlg.geometry(f"{dw}x{dh}+{dx}+{dy}")
+
+        fnt_h = ('Segoe UI', 11, 'bold')
+        fnt_sub = ('Segoe UI', 9)
+        fnt_btn = ('Segoe UI', 9, 'bold')
+
+        # Header frame
+        hf = tk.Frame(dlg, bg='#14222d', padx=14, pady=12, highlightthickness=1, highlightbackground='#00b4d8')
+        hf.pack(fill='x')
+        tk.Label(hf, text=f"🚀 Phát Hiện Phiên Bản Mới: {latest_ver}", font=fnt_h, bg='#14222d', fg='#00e5ff').pack(anchor='w')
+        tk.Label(hf, text=f"Phiên bản hiện tại: v{APP_VERSION}{size_str}", font=fnt_sub, bg='#14222d', fg='#90b4ce').pack(anchor='w', pady=(2, 0))
+
+        # Content frame (Release notes)
+        cf = tk.Frame(dlg, bg='#1e1e1e', padx=14, pady=8)
+        cf.pack(fill='both', expand=True)
+
+        tk.Label(cf, text=f"Nội dung cập nhật ({release_name}):", font=fnt_btn, bg='#1e1e1e', fg='#ffffff').pack(anchor='w', pady=(2, 4))
+
+        txt_frame = tk.Frame(cf, bg='#252526', highlightthickness=1, highlightbackground='#3a3a3a')
+        txt_frame.pack(fill='both', expand=True)
+
+        scroll = tk.Scrollbar(txt_frame)
+        txt = tk.Text(txt_frame, wrap='word', font=('Segoe UI', 9), bg='#252526', fg='#cccccc', yscrollcommand=scroll.set, bd=0, padx=8, pady=6)
+        scroll.config(command=txt.yview)
+        scroll.pack(side='right', fill='y')
+        txt.pack(side='left', fill='both', expand=True)
+
+        if body:
+            txt.insert('1.0', body)
+        else:
+            txt.insert('1.0', f"Bản cập nhật {latest_ver} với các cải tiến và sửa lỗi mới nhất từ GitHub Releases.")
+        txt.config(state='disabled')
+
+        # Action button bar
+        bf = tk.Frame(dlg, bg='#181818', padx=14, pady=10, highlightthickness=1, highlightbackground='#2c2c2c')
+        bf.pack(fill='x', side='bottom')
+
+        def _do_update():
+            dlg.destroy()
+            self._start_download_and_apply(info)
+
+        def _do_browser():
+            if info.get('html_url'):
+                webbrowser.open(info['html_url'])
+
+        btn_up = tk.Button(bf, text="⚡ Cập Nhật Tự Động Ngay", font=fnt_btn, bg=self.green, fg='#000000', padx=12, relief='flat', cursor='hand2', command=_do_update)
+        btn_up.pack(side='right', padx=(8, 0), ipady=4)
+
+        btn_gh = tk.Button(bf, text="🌐 GitHub", font=fnt_sub, bg='#0077b6', fg='#ffffff', padx=10, relief='flat', cursor='hand2', command=_do_browser)
+        btn_gh.pack(side='right', padx=(8, 0), ipady=4)
+
+        btn_skip = tk.Button(bf, text="Để Sau", font=fnt_sub, bg='#383838', fg='#bbbbbb', padx=10, relief='flat', cursor='hand2', command=dlg.destroy)
+        btn_skip.pack(side='right', ipady=4)
+
+    def _start_download_and_apply(self, info):
+        """Downloads the new release exe in a background thread with toolbar progress and triggers restart."""
+        download_url = info.get('download_url')
+        if not download_url:
+            if info.get('html_url'):
+                webbrowser.open(info['html_url'])
+            messagebox.showinfo("Cập nhật", "Không tìm thấy file thực thi trực tiếp (.exe) trên Release.\nĐã mở trang GitHub để bạn tải thủ công.")
+            return
+
+        base_dir = get_base_dir()
+        temp_exe = os.path.join(base_dir, "voice_to_text_update.tmp")
+
+        self.show_temp_status("Tải: 0%", self.green, 60000)
+
+        def _worker():
+            def _progress(down, total, pct):
+                pct_str = f"Tải: {pct}%" if pct > 0 else "Tải..."
+                try:
+                    self.root.after(0, lambda: self.status.config(text=pct_str, fg=self.green))
+                except Exception:
+                    pass
+
+            try:
+                # 1. Download updated exe
+                download_update_file(download_url, temp_exe, progress_callback=_progress, timeout=120.0)
+
+                # 2. Also sync voice_to_text.py if python source file exists
+                py_file = os.path.join(base_dir, "voice_to_text.py")
+                if os.path.exists(py_file):
+                    repo = getattr(self, 'github_repo', GITHUB_REPO)
+                    raw_py_url = f"https://raw.githubusercontent.com/{repo}/main/voice_to_text.py"
+                    try:
+                        raw_req = urllib.request.Request(raw_py_url, headers={"User-Agent": f"VoiceToText-App/{APP_VERSION}"})
+                        with urllib.request.urlopen(raw_req, timeout=10.0) as raw_resp:
+                            if raw_resp.status == 200:
+                                py_content = raw_resp.read()
+                                if len(py_content) > 1000:
+                                    with open(py_file, 'wb') as pf:
+                                        pf.write(py_content)
+                    except Exception:
+                        pass
+
+                # 3. Inform user and launch updater
+                try:
+                    self.root.after(0, lambda: self.status.config(text="Khởi động...", fg=self.yellow))
+                except Exception:
+                    pass
+
+                time.sleep(0.5)
+                launch_updater_and_restart(temp_exe)
+
+                # Close current app to release locks
+                self.root.after(100, lambda: self.close_app())
+            except Exception as e:
+                err_msg = str(e)
+                try:
+                    self.root.after(0, lambda: self.show_temp_status("Lỗi tải!", self.red, 3000))
+                    self.root.after(0, lambda: messagebox.showerror("Lỗi Cập Nhật", f"Không thể tải bản cập nhật:\n{err_msg}"))
+                except Exception:
+                    pass
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def close_app(self, e=None):
         self._log_error(f"close_app was triggered with event: {e}")
