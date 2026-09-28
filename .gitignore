@@ -1,0 +1,20 @@
+# PyInstaller build artifacts
+build/
+dist/
+__pycache__/
+*.pyc
+*.pyo
+
+# Backup binaries and archives
+*.rar
+*.zip
+*.7z
+*.bak
+*_backup.exe
+voice_to_text.exe
+
+# Temporary and update files
+*.tmp
+*.log
+_apply_update.bat
+voice_to_text_update.exe

@@ -1,0 +1,15 @@
+{
+  "click_x": 1066,
+  "click_y": 1012,
+  "window_x": -12,
+  "window_y": 1127,
+  "silence_timeout": 1.5,
+  "ui_scale": 2.5,
+  "lang_mode": "auto",
+  "use_fixed_coord": false,
+  "auto_paste_enter_on_click": true,
+  "paste_enter_delay": 0.5,
+  "gemini_enabled": true,
+  "gemini_api_key": "AIzaSyB9JfzipzNvOLqA5beoEe2uI0xKEJN98Ns",
+  "gemini_model": "gemini-2.5-flash"
+}
