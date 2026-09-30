@@ -31,6 +31,31 @@ import re
 import subprocess
 import sys
 
+# High-DPI Awareness for crisp rendering on 125%, 150%, 200% displays
+def init_windows_dpi():
+    if sys.platform != 'win32':
+        return 1.0
+    try:
+        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+    except Exception:
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        except Exception:
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass
+    try:
+        hdc = ctypes.windll.user32.GetDC(0)
+        dpi = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)
+        ctypes.windll.user32.ReleaseDC(0, hdc)
+        return max(1.0, dpi / 96.0)
+    except Exception:
+        return 1.0
+
+DPI_SCALE = init_windows_dpi()
+
 def get_base_dir():
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
@@ -98,7 +123,7 @@ def get_sherpa_model_paths():
 
 
 # Constants
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.1.1"
 GITHUB_REPO = "chjhieuvni-oss/voice-to-text"
 DEFAULT_UPDATE_MANIFEST_URL = ""
 DEFAULT_GEMINI_API_KEY = "AIzaSyCP3clTEAyb6YPhZSWLxxmPubrGP-3Uhfg"
@@ -1004,6 +1029,7 @@ class App:
         self.gemini_enabled = True
         self.gemini_api_key = DEFAULT_GEMINI_API_KEY
         self.gemini_model = "gemini-2.5-flash"
+        self.dpi_scale = DPI_SCALE
         self.auto_check_update = True
         self.github_repo = GITHUB_REPO
 
@@ -2334,15 +2360,19 @@ class App:
         win.attributes('-topmost', True)
         self.settings_win = win
 
-        # Center on screen comfortably
-        ww, wh = 510, 720
+        # Responsive sizing according to display DPI & resolution
+        dpi = getattr(self, 'dpi_scale', DPI_SCALE)
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
-        wh = min(wh, sh - 80)
-        wx = max(40, (sw - ww) // 2)
-        wy = max(40, (sh - wh) // 2)
+        ww = max(540, int(540 * min(1.8, max(1.0, dpi))))
+        wh = max(720, int(720 * min(1.8, max(1.0, dpi))))
+        wh = min(wh, sh - 60)
+        ww = min(ww, sw - 60)
+        wx = max(30, (sw - ww) // 2)
+        wy = max(30, (sh - wh) // 2)
         win.geometry(f"{ww}x{wh}+{wx}+{wy}")
-        win.resizable(False, False)
+        win.minsize(500, 480)
+        win.resizable(True, True)
 
         fnt_title = ('Segoe UI', 12, 'bold')
         fnt_sec = ('Segoe UI', 9, 'bold')
@@ -2365,6 +2395,7 @@ class App:
 
         pad.bind("<Configure>", _on_frame_configure)
         canvas_window = canvas.create_window((0, 0), window=pad, anchor="nw", width=ww - 20)
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(canvas_window, width=max(460, e.width - 24)))
         canvas.configure(yscrollcommand=v_scroll.set)
 
         def _on_mousewheel(event):
@@ -2732,27 +2763,55 @@ class App:
         dlg.title(f"Cập nhật mới: {latest_ver}")
         dlg.configure(bg='#1e1e1e')
         dlg.attributes('-topmost', True)
-        dlg.resizable(False, False)
+        dlg.resizable(True, True)
 
-        dw, dh = 460, 360
+        # Responsive sizing according to display DPI & resolution (prevents cramped shrunken window)
+        dpi = getattr(self, 'dpi_scale', DPI_SCALE)
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
-        dx = max(40, (sw - dw) // 2)
-        dy = max(40, (sh - dh) // 2)
+        dw = max(580, int(580 * min(1.8, max(1.0, dpi))))
+        dh = max(460, int(460 * min(1.8, max(1.0, dpi))))
+        dw = min(dw, sw - 60)
+        dh = min(dh, sh - 60)
+        dx = max(30, (sw - dw) // 2)
+        dy = max(30, (sh - dh) // 2)
         dlg.geometry(f"{dw}x{dh}+{dx}+{dy}")
+        dlg.minsize(520, 380)
 
         fnt_h = ('Segoe UI', 11, 'bold')
         fnt_sub = ('Segoe UI', 9)
         fnt_btn = ('Segoe UI', 9, 'bold')
 
+        def _do_update():
+            dlg.destroy()
+            self._start_download_and_apply(info)
+
+        def _do_browser():
+            if info.get('html_url'):
+                webbrowser.open(info['html_url'])
+
+        # CRITICAL FIX: Pack Action Button bar (bf) FIRST at side='bottom'
+        # This guarantees buttons are NEVER clipped or pushed off-screen regardless of window size!
+        bf = tk.Frame(dlg, bg='#181818', padx=16, pady=12, highlightthickness=1, highlightbackground='#2c2c2c')
+        bf.pack(fill='x', side='bottom')
+
+        btn_up = tk.Button(bf, text="⚡ Cập Nhật Tự Động Ngay", font=fnt_btn, bg=self.green, fg='#000000', padx=16, relief='flat', cursor='hand2', command=_do_update)
+        btn_up.pack(side='right', padx=(10, 0), ipady=6)
+
+        btn_gh = tk.Button(bf, text="🌐 GitHub", font=fnt_sub, bg='#0077b6', fg='#ffffff', padx=12, relief='flat', cursor='hand2', command=_do_browser)
+        btn_gh.pack(side='right', padx=(8, 0), ipady=6)
+
+        btn_skip = tk.Button(bf, text="Để Sau", font=fnt_sub, bg='#383838', fg='#bbbbbb', padx=12, relief='flat', cursor='hand2', command=dlg.destroy)
+        btn_skip.pack(side='right', ipady=6)
+
         # Header frame
-        hf = tk.Frame(dlg, bg='#14222d', padx=14, pady=12, highlightthickness=1, highlightbackground='#00b4d8')
-        hf.pack(fill='x')
+        hf = tk.Frame(dlg, bg='#14222d', padx=16, pady=12, highlightthickness=1, highlightbackground='#00b4d8')
+        hf.pack(fill='x', side='top')
         tk.Label(hf, text=f"🚀 Phát Hiện Phiên Bản Mới: {latest_ver}", font=fnt_h, bg='#14222d', fg='#00e5ff').pack(anchor='w')
         tk.Label(hf, text=f"Phiên bản hiện tại: v{APP_VERSION}{size_str}", font=fnt_sub, bg='#14222d', fg='#90b4ce').pack(anchor='w', pady=(2, 0))
 
         # Content frame (Release notes)
-        cf = tk.Frame(dlg, bg='#1e1e1e', padx=14, pady=8)
+        cf = tk.Frame(dlg, bg='#1e1e1e', padx=16, pady=8)
         cf.pack(fill='both', expand=True)
 
         tk.Label(cf, text=f"Nội dung cập nhật ({release_name}):", font=fnt_btn, bg='#1e1e1e', fg='#ffffff').pack(anchor='w', pady=(2, 4))
@@ -2761,7 +2820,7 @@ class App:
         txt_frame.pack(fill='both', expand=True)
 
         scroll = tk.Scrollbar(txt_frame)
-        txt = tk.Text(txt_frame, wrap='word', font=('Segoe UI', 9), bg='#252526', fg='#cccccc', yscrollcommand=scroll.set, bd=0, padx=8, pady=6)
+        txt = tk.Text(txt_frame, wrap='word', font=('Segoe UI', 9), bg='#252526', fg='#cccccc', yscrollcommand=scroll.set, bd=0, padx=10, pady=8)
         scroll.config(command=txt.yview)
         scroll.pack(side='right', fill='y')
         txt.pack(side='left', fill='both', expand=True)
@@ -2772,26 +2831,11 @@ class App:
             txt.insert('1.0', f"Bản cập nhật {latest_ver} với các cải tiến và sửa lỗi mới nhất từ GitHub Releases.")
         txt.config(state='disabled')
 
-        # Action button bar
-        bf = tk.Frame(dlg, bg='#181818', padx=14, pady=10, highlightthickness=1, highlightbackground='#2c2c2c')
-        bf.pack(fill='x', side='bottom')
-
-        def _do_update():
-            dlg.destroy()
-            self._start_download_and_apply(info)
-
-        def _do_browser():
-            if info.get('html_url'):
-                webbrowser.open(info['html_url'])
-
-        btn_up = tk.Button(bf, text="⚡ Cập Nhật Tự Động Ngay", font=fnt_btn, bg=self.green, fg='#000000', padx=12, relief='flat', cursor='hand2', command=_do_update)
-        btn_up.pack(side='right', padx=(8, 0), ipady=4)
-
-        btn_gh = tk.Button(bf, text="🌐 GitHub", font=fnt_sub, bg='#0077b6', fg='#ffffff', padx=10, relief='flat', cursor='hand2', command=_do_browser)
-        btn_gh.pack(side='right', padx=(8, 0), ipady=4)
-
-        btn_skip = tk.Button(bf, text="Để Sau", font=fnt_sub, bg='#383838', fg='#bbbbbb', padx=10, relief='flat', cursor='hand2', command=dlg.destroy)
-        btn_skip.pack(side='right', ipady=4)
+        # Keyboard shortcuts and default focus for quick update
+        btn_up.focus_set()
+        dlg.bind('<Return>', lambda e: _do_update())
+        dlg.bind('<KP_Enter>', lambda e: _do_update())
+        dlg.bind('<Escape>', lambda e: dlg.destroy())
 
     def _start_download_and_apply(self, info):
         """Downloads the new release exe in a background thread with toolbar progress and triggers restart."""
