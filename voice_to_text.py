@@ -123,10 +123,10 @@ def get_sherpa_model_paths():
 
 
 # Constants
-APP_VERSION = "2.1.2"
+APP_VERSION = "2.1.3"
 GITHUB_REPO = "chjhieuvni-oss/voice-to-text"
 DEFAULT_UPDATE_MANIFEST_URL = ""
-DEFAULT_GEMINI_API_KEY = "AIzaSyCP3clTEAyb6YPhZSWLxxmPubrGP-3Uhfg"
+DEFAULT_GEMINI_API_KEY = "AIzaSyB9JfzipzNvOLqA5beoEe2uI0xKEJN98Ns"
 CLICK_X = 1066
 CLICK_Y = 1012
 DEFAULT_WINDOW_X = 1501
@@ -1550,7 +1550,7 @@ class App:
                     self.ui_scale = float(data.get('ui_scale', getattr(self, 'ui_scale', UI_SCALE)))
                     self.gemini_enabled = bool(data.get('gemini_enabled', True))
                     raw_key = str(data.get('gemini_api_key', '')).strip()
-                    if not raw_key or raw_key == "AIzaSyB9JfzipzNvOLqA5beoEe2uI0xKEJN98Ns":
+                    if not raw_key:
                         raw_key = DEFAULT_GEMINI_API_KEY
                     self.gemini_api_key = raw_key
                     m = str(data.get('gemini_model', 'gemini-2.5-flash'))
