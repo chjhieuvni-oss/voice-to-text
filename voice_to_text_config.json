@@ -1,8 +1,8 @@
 {
   "click_x": 1066,
   "click_y": 1012,
-  "window_x": -22,
-  "window_y": 1137,
+  "window_x": 4,
+  "window_y": 1100,
   "silence_timeout": 1.5,
   "ui_scale": 2.5,
   "lang_mode": "auto",
@@ -10,7 +10,7 @@
   "auto_paste_enter_on_click": true,
   "paste_enter_delay": 0.5,
   "gemini_enabled": true,
-  "gemini_api_key": "AIzaSyB9JfzipzNvOLqA5beoEe2uI0xKEJN98Ns",
+  "gemini_api_key": "AIzaSyCP3clTEAyb6YPhZSWLxxmPubrGP-3Uhfg",
   "gemini_model": "gemini-2.5-flash",
   "auto_check_update": true,
   "github_repo": "chjhieuvni-oss/voice-to-text"

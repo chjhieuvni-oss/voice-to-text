@@ -58,10 +58,50 @@ import speech_recognition as sr
 from PIL import Image, ImageDraw, ImageTk
 import winsound
 
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
+try:
+    import sounddevice as sd
+except ImportError:
+    sd = None
+
+try:
+    import sherpa_onnx
+except ImportError:
+    sherpa_onnx = None
+
+
+def get_sherpa_model_paths():
+    candidates = []
+    if hasattr(sys, '_MEIPASS'):
+        candidates.append(os.path.join(sys._MEIPASS, "models", "sherpa-onnx-zipformer-vi-30M-int8-2026-02-09"))
+    candidates.append(os.path.join(get_base_dir(), "models", "sherpa-onnx-zipformer-vi-30M-int8-2026-02-09"))
+    candidates.append(r"D:\Setup\voice to text\models\sherpa-onnx-zipformer-vi-30M-int8-2026-02-09")
+
+    for model_dir in candidates:
+        encoder = os.path.join(model_dir, "encoder.int8.onnx")
+        decoder = os.path.join(model_dir, "decoder.onnx")
+        joiner = os.path.join(model_dir, "joiner.int8.onnx")
+        tokens = os.path.join(model_dir, "tokens.txt")
+        if os.path.exists(encoder) and os.path.exists(tokens):
+            return {
+                "encoder": encoder,
+                "decoder": decoder,
+                "joiner": joiner,
+                "tokens": tokens,
+            }
+    return None
+
+
+
 # Constants
-APP_VERSION = "2.0.1"
+APP_VERSION = "2.1.0"
 GITHUB_REPO = "chjhieuvni-oss/voice-to-text"
 DEFAULT_UPDATE_MANIFEST_URL = ""
+DEFAULT_GEMINI_API_KEY = "AIzaSyCP3clTEAyb6YPhZSWLxxmPubrGP-3Uhfg"
 CLICK_X = 1066
 CLICK_Y = 1012
 DEFAULT_WINDOW_X = 1501
@@ -821,19 +861,15 @@ class CancellableStream:
         return getattr(self._stream, name)
 
 
-GEMINI_SYSTEM_PROMPT = """Bạn là trợ lý AI hiệu đính tiếng Việt thông minh cho phần mềm Voice-To-Text.
-Người dùng đang nói vào micro để soạn thảo hoặc chat. Bộ nhận diện âm thanh thường bị nghe nhầm một số từ phát âm lướt, từ đồng âm, hoặc thuật ngữ tiếng Anh/công nghệ/lập trình/POD.
+GEMINI_SYSTEM_PROMPT = """Bạn là trợ lý AI hiệu đính tiếng Việt và tiếng Anh siêu thông minh cho phần mềm Voice-To-Text.
+Người dùng đang nói bằng giọng nói tự nhiên, có thể nói tiếng Việt, tiếng Anh, hoặc chêm từ tiếng Anh (code-switching).
+Bộ nhận diện âm thanh thường phiên âm từ tiếng Anh thành âm tiếng Việt hoặc nghe nhầm các từ công nghệ, lập trình, kinh doanh, POD, thương mại điện tử (Etsy, Shopify, Amazon), văn phòng.
+
 Nhiệm vụ:
-1. Đọc toàn bộ ngữ cảnh câu, đoán các từ bị nghe nhầm và sửa lại thành câu nói hoàn chỉnh, tự nhiên, đúng ngữ pháp và đúng chính tả tiếng Việt.
-   Ví dụ:
-   - "cá hợp lý rồi" -> "Khá hợp lý rồi"
-   - "sau khi tôi yêu xong" -> "sau khi tối ưu xong"
-   - "bỏ nút quét đi đi" -> "bỏ nút stop đi"
-   - "cho thun khởi động nhanh" -> "cho tool khởi động nhanh"
-   - "móp cúp áo thun" -> "mockup áo thun"
-2. Giữ nguyên ý định, phong cách và đại từ xưng hô của người nói.
-3. Thêm dấu câu (phẩy, chấm, hỏi) tự nhiên.
-4. TUYỆT ĐỐI CHỈ XUẤT RA DUY NHẤT CÂU VĂN ĐÃ SỬA, KHÔNG thêm bất kỳ lời dẫn, giải thích hay dấu ngoặc kép nào."""
+1. Nhận diện các từ tiếng Anh bị phiên âm sai hoặc nghe nhầm và khôi phục về tiếng Anh chuẩn (Ví dụ: 'phích bấc' -> 'feedback', 'chép meo' / 'chếch meo' -> 'check mail', 'cốt' -> 'code', 'sét úp' -> 'setup', 'móp cúp' -> 'mockup', 'dê mi ni' -> 'Gemini', 'ét si' -> 'Etsy', 'bút lếch' -> 'bootleg', 'ti sớt' -> 't-shirt', 'ráp ti' -> 'rap tee', 'pờ rôm' -> 'prompt').
+2. Nếu người dùng nói hoàn toàn bằng tiếng Anh hoặc một cụm từ tiếng Anh, hãy sửa thành tiếng Anh chuẩn chính tả.
+3. Nếu người dùng nói tiếng Việt kết hợp tiếng Anh, giữ câu văn tự nhiên, mượt mà, đúng ngữ pháp, thêm dấu câu (chấm, phẩy, hỏi) hợp lý.
+4. TUYỆT ĐỐI CHỈ XUẤT RA DUY NHẤT CÂU VĂN ĐÃ SỬA. KHÔNG giải thích, KHÔNG thêm lời dẫn, KHÔNG để trong dấu ngoặc kép."""
 
 
 def refine_text_with_gemini(raw_text: str, api_key: str, model: str = "gemini-2.5-flash", timeout: float = 3.5, raise_exceptions: bool = False) -> str:
@@ -966,10 +1002,14 @@ class App:
         self._auto_paste_enter_on_finish = False
         self._click_target_hwnd = None
         self.gemini_enabled = True
-        self.gemini_api_key = ""
+        self.gemini_api_key = DEFAULT_GEMINI_API_KEY
         self.gemini_model = "gemini-2.5-flash"
         self.auto_check_update = True
         self.github_repo = GITHUB_REPO
+
+        # Sherpa-ONNX Zipformer Vietnamese streaming engine
+        self._sherpa_rec = None
+        threading.Thread(target=self._init_sherpa, daemon=True).start()
 
         # Load persisted config
         self.load_config()
@@ -1421,7 +1461,10 @@ class App:
                     self.paste_enter_delay = float(data.get('paste_enter_delay', 0.3))
                     self.ui_scale = float(data.get('ui_scale', getattr(self, 'ui_scale', UI_SCALE)))
                     self.gemini_enabled = bool(data.get('gemini_enabled', True))
-                    self.gemini_api_key = str(data.get('gemini_api_key', ''))
+                    raw_key = str(data.get('gemini_api_key', '')).strip()
+                    if not raw_key or raw_key == "AIzaSyB9JfzipzNvOLqA5beoEe2uI0xKEJN98Ns":
+                        raw_key = DEFAULT_GEMINI_API_KEY
+                    self.gemini_api_key = raw_key
                     m = str(data.get('gemini_model', 'gemini-2.5-flash'))
                     if m in ('gemini-1.5-flash', 'gemini-1.5-pro'):
                         m = 'gemini-2.5-flash'
@@ -1473,14 +1516,8 @@ class App:
         self.status.config(text=text, fg=color)
         self.root.after(duration, lambda: self.status.config(text='Ready', fg=self.muted))
 
-    def _show_speech_popup(self, raw_text, final_text):
-        """Show floating preview of recognized voice text."""
-        try:
-            if self._speech_popup and self._speech_popup.winfo_exists():
-                self._speech_popup.destroy()
-        except Exception:
-            pass
-
+    def _show_speech_popup(self, raw_text, final_text, is_live=False):
+        """Show floating preview of recognized voice text (supports smooth live streaming)."""
         if not raw_text and not final_text:
             return
 
@@ -1488,24 +1525,45 @@ class App:
         if len(display_text) > 130:
             display_text = display_text[:127] + "..."
 
+        # If live and popup already exists, update text smoothly without flickering
+        if is_live and getattr(self, '_speech_popup', None) and self._speech_popup.winfo_exists():
+            try:
+                if hasattr(self, '_speech_popup_lbl') and self._speech_popup_lbl.winfo_exists():
+                    self._speech_popup_lbl.config(text=f"🎙️ {display_text}", fg=self.yellow)
+                    return
+            except Exception:
+                pass
+
+        try:
+            if getattr(self, '_speech_popup', None) and self._speech_popup.winfo_exists():
+                self._speech_popup.destroy()
+        except Exception:
+            pass
+
         popup = tk.Toplevel(self.root)
         popup.overrideredirect(True)
         popup.attributes('-topmost', True)
-        popup.config(bg=self.yellow)
+        popup.config(bg='#00b4d8' if is_live else self.yellow)
 
         inner = tk.Frame(popup, bg=self.bg2, padx=10, pady=5)
         inner.pack(fill='both', expand=True, padx=1, pady=1)
 
         is_ai_refined = bool(final_text and raw_text and final_text.strip().lower() != raw_text.strip().lower())
-        prefix = "✨ " if is_ai_refined else "📋 "
+        if is_live:
+            prefix = "🎙️ "
+            lbl_fg = self.yellow
+        else:
+            prefix = "✨ " if is_ai_refined else "📋 "
+            lbl_fg = '#00e676' if is_ai_refined else self.green
 
         lbl = tk.Label(
             inner, text=f"{prefix}{display_text}", font=('Segoe UI', 10),
-            bg=self.bg2, fg='#00e676' if is_ai_refined else self.green, wraplength=440, justify='left'
+            bg=self.bg2, fg=lbl_fg, wraplength=440, justify='left'
         )
         lbl.pack(anchor='w')
+        self._speech_popup_lbl = lbl
 
-        if is_ai_refined:
+        if not is_live and is_ai_refined:
             raw_disp = raw_text if len(raw_text) <= 75 else raw_text[:72] + "..."
             lbl_raw = tk.Label(
                 inner, text=f"Gốc: {raw_disp}", font=('Segoe UI', 8),
@@ -1522,7 +1580,8 @@ class App:
         popup.geometry(f"+{px}+{py}")
 
         self._speech_popup = popup
-        popup.after(3800, lambda: popup.destroy() if popup.winfo_exists() else None)
+        if not is_live:
+            popup.after(3800, lambda: popup.destroy() if popup.winfo_exists() else None)
 
     def set_ui(self, listening: bool):
         st = self._ib_state.get('tb_mic')
@@ -1546,6 +1605,24 @@ class App:
                 st['hbg'] = '#2c3f32'
                 self.status.config(text="Ready", fg=self.muted)
             self._rdraw_mic()
+
+    def _init_sherpa(self):
+        """Asynchronously loads Sherpa-ONNX Zipformer Vietnamese model for instantaneous streaming ASR."""
+        paths = get_sherpa_model_paths()
+        if paths and sherpa_onnx is not None:
+            try:
+                self._sherpa_rec = sherpa_onnx.OfflineRecognizer.from_transducer(
+                    tokens=paths["tokens"],
+                    encoder=paths["encoder"],
+                    decoder=paths["decoder"],
+                    joiner=paths["joiner"],
+                    num_threads=2,
+                    sample_rate=16000,
+                    feature_dim=80,
+                )
+            except Exception as e:
+                self._log_error(f"Failed to load Sherpa-ONNX model: {e}")
+                self._sherpa_rec = None
 
     def _initial_calibrate(self):
         """Initial background calibration of mic without blocking UI."""
@@ -1731,7 +1808,166 @@ class App:
         else:
             return res_en
 
+    def _worker_sherpa_streaming(self):
+        """Real-time streaming speech recognition using sounddevice + Sherpa-ONNX Zipformer Vi."""
+        temp_status = None
+        try:
+            sample_rate = 16000
+            block_size = 1600  # 100ms
+            audio_buffer = []
+            audio_queue = []
+            has_spoken = False
+            last_speech_time = None
+            last_preview_time = 0
+            min_speech_energy = 0.004
+
+            self.root.after(0, lambda: self.status.config(text="Speak now...", fg=self.yellow))
+
+            def _audio_callback(indata, frames, time_info, status):
+                audio_queue.append(indata.copy())
+
+            stream_kwargs = {
+                'samplerate': sample_rate,
+                'channels': 1,
+                'dtype': 'float32',
+                'blocksize': block_size,
+                'callback': _audio_callback,
+            }
+            if self.mic_index is not None:
+                try:
+                    stream_kwargs['device'] = self.mic_index
+                except Exception:
+                    pass
+
+            with sd.InputStream(**stream_kwargs):
+                t_start = time.time()
+                while self.listening and not getattr(self, '_stop_requested', False):
+                    time.sleep(0.03)
+
+                    # Drain audio queue
+                    while audio_queue:
+                        chunk = audio_queue.pop(0).flatten()
+                        audio_buffer.extend(chunk)
+
+                        energy = np.sqrt(np.mean(chunk**2)) if len(chunk) > 0 else 0
+                        if energy > min_speech_energy:
+                            last_speech_time = time.time()
+                            has_spoken = True
+
+                    now = time.time()
+
+                    # Live preview every 220ms once user starts speaking
+                    if has_spoken and (now - last_preview_time >= 0.22) and len(audio_buffer) >= 3200:
+                        last_preview_time = now
+                        try:
+                            s = self._sherpa_rec.create_stream()
+                            s.accept_waveform(sample_rate, np.array(audio_buffer, dtype=np.float32))
+                            self._sherpa_rec.decode_stream(s)
+                            partial = s.result.text.strip()
+                            if partial:
+                                disp = partial.lower().capitalize()
+                                self.root.after(0, lambda t=disp: self._show_speech_popup(t, "", is_live=True))
+                                self.root.after(0, lambda: self.status.config(text="● Đang nghe...", fg=self.yellow))
+                        except Exception:
+                            pass
+
+                    # Silence cut-off
+                    if has_spoken and last_speech_time and (now - last_speech_time > self.silence_timeout):
+                        break
+
+                    # Maximum phrase limit: 45s
+                    if now - t_start > 45:
+                        break
+
+            if not self.listening and not getattr(self, '_auto_paste_enter_on_finish', False):
+                return
+
+            self.root.after(0, lambda: self.status.config(text="Transcribing...", fg=self.yellow))
+
+            if not has_spoken or len(audio_buffer) < 3200:
+                temp_status = ("NoSpeech", self.muted)
+                return
+
+            # Final decode on full buffer
+            s = self._sherpa_rec.create_stream()
+            s.accept_waveform(sample_rate, np.array(audio_buffer, dtype=np.float32))
+            self._sherpa_rec.decode_stream(s)
+            raw_text = s.result.text.strip()
+
+            if raw_text:
+                text = raw_text.lower().capitalize()
+                text = normalize_vietnamese_speech(text)
+
+                # Optional AI Refinement with Gemini Flash (Toggleable)
+                if getattr(self, 'gemini_enabled', False) and getattr(self, 'gemini_api_key', '').strip():
+                    self.root.after(0, lambda: self.status.config(text="AI...", fg='#00d2ff'))
+                    try:
+                        refined = refine_text_with_gemini(
+                            text,
+                            api_key=self.gemini_api_key.strip(),
+                            model=getattr(self, 'gemini_model', 'gemini-2.5-flash'),
+                            timeout=3.0
+                        )
+                        if refined and refined.strip():
+                            text = refined.strip()
+                    except Exception as ai_ex:
+                        self._log_error(f"Gemini error (using Sherpa text): {ai_ex}")
+
+                self.last_text = text
+                pyperclip.copy(text)
+
+                try:
+                    winsound.Beep(1800, 70)
+                except Exception:
+                    pass
+
+                temp_status = ("Copied", self.green)
+                self.root.after(0, lambda r=raw_text, t=text: self._show_speech_popup(r, t, is_live=False))
+
+                # Auto Paste & Enter on Left-Click / Finish
+                if getattr(self, '_auto_paste_enter_on_finish', False):
+                    self._auto_paste_enter_on_finish = False
+                    target = getattr(self, '_click_target_hwnd', None) or getattr(self, 'last_external_hwnd', None)
+                    is_remote = is_remote_desktop_window(target)
+                    if target and ctypes.windll.user32.IsWindow(target):
+                        curr_fg = ctypes.windll.user32.GetForegroundWindow()
+                        if curr_fg != target:
+                            force_foreground_window(target)
+                        time.sleep(0.25 if is_remote else 0.06)
+                    else:
+                        time.sleep(0.06)
+
+                    send_paste()
+                    temp_status = ("Pasted", self.green)
+
+                    delay = getattr(self, 'paste_enter_delay', 0.3)
+                    if is_remote and delay < 0.35:
+                        delay = 0.35
+                    time.sleep(delay)
+
+                    send_enter()
+                    temp_status = ("Sent", self.yellow)
+            else:
+                temp_status = ("NoSpeech", self.muted)
+
+        except Exception as ex:
+            self._log_error(f"Sherpa streaming worker error: {ex}")
+            temp_status = ("Error", self.red)
+        finally:
+            self.listening = False
+            self._stop_requested = False
+            self.root.after(0, lambda: self.set_ui(False))
+            if temp_status:
+                self.root.after(0, lambda ts=temp_status: self.show_temp_status(ts[0], ts[1]))
+
     def worker(self):
+        """Dispatches to Sherpa-ONNX streaming engine (primary) or Google Speech (fallback)."""
+        if getattr(self, '_sherpa_rec', None) is not None and sd is not None and np is not None:
+            self._worker_sherpa_streaming()
+        else:
+            self._worker_google_fallback()
+
+    def _worker_google_fallback(self):
         """Listens, transcribes via Google Speech, and copies text to clipboard."""
         temp_status = None
         try:
@@ -2210,7 +2446,8 @@ class App:
                 activebackground='#18232c', activeforeground='#00d2ff', cursor='hand2'
             ).pack(side='left', padx=(0, 10))
 
-        tk.Label(card_ai, text="* AI tự động hiểu ngữ cảnh để sửa chính xác: \"cá hợp lý\" ➔ \"Khá hợp lý\", \"tôi yêu\" ➔ \"tối ưu\", \"móp cúp\" ➔ \"mockup\". Nếu chưa nhập Key, phần mềm vẫn hoạt động bình thường.", font=fnt_sub, bg='#18232c', fg='#7a9aa8', wraplength=440, justify='left').pack(anchor='w', pady=(3, 0))
+        tk.Label(card_ai, text="* AI tự động hiểu ngữ cảnh để sửa chính xác: \"cá hợp lý\" ➔ \"Khá hợp lý\", \"tôi yêu\" ➔ \"tối ưu\", \"móp cúp\" ➔ \"mockup\".", font=fnt_sub, bg='#18232c', fg='#7a9aa8', wraplength=440, justify='left').pack(anchor='w', pady=(3, 0))
+        tk.Label(card_ai, text="⚡ MẸO: Có thể dùng hoặc không! Khi TẮT Gemini, phần mềm chạy 100% Offline siêu tốc (<50ms) bằng mô hình Sherpa-ONNX Zipformer Vi (0đ, không cần Internet). BẬT khi bạn có key mới.", font=fnt_sub, bg='#18232c', fg='#00d2ff', wraplength=440, justify='left').pack(anchor='w', pady=(3, 0))
 
         # Card UI Scale: Kích thước giao diện (Phóng to x2, x3)
         card_scale = tk.Frame(pad, bg='#262626', padx=12, pady=10, highlightthickness=1, highlightbackground='#3a3a3a')
@@ -2359,7 +2596,7 @@ class App:
 
         row_ver = tk.Frame(card_update, bg='#1c252d')
         row_ver.pack(fill='x', pady=(2, 4))
-        tk.Label(row_ver, text=f"Phiên bản hiện tại: v{APP_VERSION}", font=fnt_sec, bg='#1c252d', fg='#ffffff').pack(side='left')
+        tk.Label(row_ver, text=f"Phiên bản hiện tại: v{APP_VERSION} (Streaming ASR)", font=fnt_sec, bg='#1c252d', fg='#48cae4').pack(side='left')
         tk.Button(
             row_ver, text="🔄 Kiểm tra cập nhật ngay", font=fnt_sub, bg='#0077b6', fg=self.white,
             relief='flat', cursor='hand2', padx=10, command=self.check_updates_interactive

@@ -18,3 +18,9 @@ voice_to_text.exe
 *.log
 _apply_update.bat
 voice_to_text_update.exe
+
+# Models and test scripts
+models/
+test_*.py
+download_model.py
+voice_to_text_prev_v2.py

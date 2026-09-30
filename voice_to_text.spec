@@ -3,18 +3,19 @@ from PyInstaller.utils.hooks import collect_data_files
 
 datas = [('D:/Setup/voice to text/icons', 'icons')]
 datas += collect_data_files('speech_recognition')
-
+datas += collect_data_files('sherpa_onnx')
+datas += [('D:/Setup/voice to text/models', 'models')]
 
 a = Analysis(
     ['D:/Setup/voice to text/voice_to_text.py'],
     pathex=[],
     binaries=[],
     datas=datas,
-    hiddenimports=[],
+    hiddenimports=['sherpa_onnx', 'sounddevice', 'numpy', '_cffi_backend'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['cv2', 'numpy', 'scipy', 'matplotlib', 'openpyxl', 'playwright', 'selenium', 'uvicorn', 'fastapi'],
+    excludes=['cv2', 'scipy', 'matplotlib', 'openpyxl', 'playwright', 'selenium', 'uvicorn', 'fastapi'],
     noarchive=False,
     optimize=0,
 )
