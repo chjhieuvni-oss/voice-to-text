@@ -123,7 +123,7 @@ def get_sherpa_model_paths():
 
 
 # Constants
-APP_VERSION = "2.1.1"
+APP_VERSION = "2.1.2"
 GITHUB_REPO = "chjhieuvni-oss/voice-to-text"
 DEFAULT_UPDATE_MANIFEST_URL = ""
 DEFAULT_GEMINI_API_KEY = "AIzaSyCP3clTEAyb6YPhZSWLxxmPubrGP-3Uhfg"
@@ -535,8 +535,26 @@ def is_remote_desktop_window(hwnd):
     user32.GetWindowTextW(hwnd, title, 512)
     c_lower = cls.value.lower()
     t_lower = title.value.lower()
-    remote_sigs = ['rustdesk', 'flutterview', 'anydesk', 'teamviewer', 'mstsc', 'remote desktop', 'vmware', 'virtualbox']
-    return any(sig in c_lower or sig in t_lower for sig in remote_sigs)
+    remote_sigs = ['rustdesk', 'flutterview', 'flutter', 'anydesk', 'teamviewer', 'mstsc', 'remote desktop', 'vmware', 'virtualbox', 'ultraviewer']
+    if any(sig in c_lower or sig in t_lower for sig in remote_sigs):
+        return True
+    try:
+        pid = ctypes.c_ulong()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value:
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            h_proc = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+            if h_proc:
+                buf = ctypes.create_unicode_buffer(1024)
+                size = ctypes.c_ulong(1024)
+                if ctypes.windll.kernel32.QueryFullProcessImageNameW(h_proc, 0, buf, ctypes.byref(size)):
+                    p_lower = buf.value.lower()
+                    ctypes.windll.kernel32.CloseHandle(h_proc)
+                    return any(sig in p_lower for sig in remote_sigs)
+                ctypes.windll.kernel32.CloseHandle(h_proc)
+    except Exception:
+        pass
+    return False
 
 
 def force_foreground_window(hwnd):
@@ -626,46 +644,80 @@ def send_enter():
 
 
 def send_scroll(delta=360, target_hwnd=None, target_x=None, target_y=None):
-    """Simulates authentic mouse wheel scrolling (WM_MOUSEWHEEL) without moving or capturing the mouse cursor."""
+    """Simulates authentic mouse wheel scrolling (MOUSEEVENTF_WHEEL + WM_MOUSEWHEEL)
+    with cursor positioning inside target window (essential for RustDesk and Remote Desktop),
+    and seamlessly restores the cursor to its previous position so toolbar buttons stay clickable."""
     user32 = ctypes.windll.user32
+    MOUSEEVENTF_WHEEL = 0x0800
     WM_MOUSEWHEEL = 0x020A
 
+    class POINT(ctypes.Structure):
+        _fields_ = [('x', ctypes.c_long), ('y', ctypes.c_long)]
+
+    class RECT(ctypes.Structure):
+        _fields_ = [('left', ctypes.c_long), ('top', ctypes.c_long),
+                    ('right', ctypes.c_long), ('bottom', ctypes.c_long)]
+
+    # 1. Save current cursor position (over the toolbar button)
+    pt_orig = POINT()
+    user32.GetCursorPos(ctypes.byref(pt_orig))
+    orig_x, orig_y = pt_orig.x, pt_orig.y
+
+    # 2. Resolve target HWND
     if not target_hwnd or not user32.IsWindow(target_hwnd):
         target_hwnd = user32.GetForegroundWindow()
 
+    # 3. Focus target window if specified
+    if target_hwnd and user32.IsWindow(target_hwnd):
+        force_foreground_window(target_hwnd)
+        is_remote = is_remote_desktop_window(target_hwnd)
+        time.sleep(0.12 if is_remote else 0.04)
+
+    # 4. Resolve target coordinate inside target window
     if target_x is None or target_y is None:
         if target_hwnd and user32.IsWindow(target_hwnd):
-            class RECT(ctypes.Structure):
-                _fields_ = [('left', ctypes.c_long), ('top', ctypes.c_long),
-                            ('right', ctypes.c_long), ('bottom', ctypes.c_long)]
             rect = RECT()
             if user32.GetWindowRect(target_hwnd, ctypes.byref(rect)):
                 target_x = (rect.left + rect.right) // 2
                 target_y = (rect.top + rect.bottom) // 2
             else:
-                target_x, target_y = 600, 400
+                target_x, target_y = 800, 500
         else:
-            target_x, target_y = 600, 400
+            target_x, target_y = 800, 500
 
     target_x = int(target_x)
     target_y = int(target_y)
 
-    class POINT(ctypes.Structure):
-        _fields_ = [('x', ctypes.c_long), ('y', ctypes.c_long)]
+    # 5. CRITICAL FOR RUSTDESK: Move cursor inside the remote desktop window
+    # RustDesk only captures and forwards mouse wheel events when cursor is inside its canvas!
+    user32.SetCursorPos(target_x, target_y)
+    time.sleep(0.02)
 
-    pt = POINT(target_x, target_y)
-    child = user32.WindowFromPoint(pt)
+    # 6. Fire authentic OS-level mouse wheel event via mouse_event
+    # Send 3 distinct wheel notches (delta 120 each, total 360) for natural, fluid scrolling
+    step = 120 if delta > 0 else -120
+    notches = max(1, abs(int(delta)) // 120)
+    for _ in range(notches):
+        user32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, step, 0)
+        time.sleep(0.015)
 
-    wParam = (int(delta) << 16) & 0xFFFFFFFF
-    lParam = ((target_y & 0xFFFF) << 16) | (target_x & 0xFFFF)
+    # 7. Dual fallback: also PostMessage WM_MOUSEWHEEL to the target / child window
+    try:
+        pt = POINT(target_x, target_y)
+        child = user32.WindowFromPoint(pt)
+        wParam = (int(delta) << 16) & 0xFFFFFFFF
+        lParam = ((target_y & 0xFFFF) << 16) | (target_x & 0xFFFF)
+        if child and user32.IsWindow(child):
+            user32.PostMessageW(child, WM_MOUSEWHEEL, wParam, lParam)
+        if target_hwnd and user32.IsWindow(target_hwnd) and target_hwnd != child:
+            user32.PostMessageW(target_hwnd, WM_MOUSEWHEEL, wParam, lParam)
+    except Exception:
+        pass
 
-    # Post WM_MOUSEWHEEL to the child window (e.g. Chrome_RenderWidgetHostHWND or Scintilla)
-    if child and user32.IsWindow(child):
-        user32.PostMessageW(child, WM_MOUSEWHEEL, wParam, lParam)
-
-    # Also post to target_hwnd if different from child
-    if target_hwnd and user32.IsWindow(target_hwnd) and target_hwnd != child:
-        user32.PostMessageW(target_hwnd, WM_MOUSEWHEEL, wParam, lParam)
+    # 8. Restore cursor position back to the toolbar button
+    # This allows the user to click repeatedly (nhấp liên tục để cuộn nhiều) without losing mouse aim!
+    time.sleep(0.02)
+    user32.SetCursorPos(orig_x, orig_y)
 
 
 def send_up():
@@ -1023,6 +1075,7 @@ class App:
         self.auto_paste_enter_on_click = True
         self.paste_enter_delay = 0.3
         self.last_external_hwnd = None
+        self.last_external_cursor_pos = None
         self._stop_requested = False
         self._auto_paste_enter_on_finish = False
         self._click_target_hwnd = None
@@ -1390,6 +1443,15 @@ class App:
                 my_hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id()) or self.root.winfo_id()
                 if fg != my_hwnd and not self._is_own_window(fg):
                     self.last_external_hwnd = fg
+            # Track mouse position when hovering over target/external window
+            class POINT(ctypes.Structure):
+                _fields_ = [('x', ctypes.c_long), ('y', ctypes.c_long)]
+            pt = POINT()
+            ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+            my_hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id()) or self.root.winfo_id()
+            cur_hwnd = ctypes.windll.user32.WindowFromPoint(pt)
+            if cur_hwnd != my_hwnd and not self._is_own_window(cur_hwnd):
+                self.last_external_cursor_pos = (pt.x, pt.y)
         except Exception:
             pass
         self.root.after(100, self._track_foreground_window)
@@ -2215,6 +2277,13 @@ class App:
                             ('right', ctypes.c_long), ('bottom', ctypes.c_long)]
             rect = RECT()
             if ctypes.windll.user32.GetWindowRect(target, ctypes.byref(rect)):
+                # If user recently had cursor inside this window, use that exact spot!
+                last_pos = getattr(self, 'last_external_cursor_pos', None)
+                if last_pos and len(last_pos) == 2:
+                    lx, ly = last_pos
+                    if rect.left <= lx <= rect.right and rect.top <= ly <= rect.bottom:
+                        return lx, ly
+
                 w = rect.right - rect.left
                 h = rect.bottom - rect.top
                 if w > 80 and h > 80:
